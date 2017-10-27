@@ -1,113 +1,95 @@
-can_load_system_tests = false
-begin
-  require 'puma'
-  require 'capybara'
-  if ActionPack::VERSION::STRING >= "5.1"
-    require 'action_dispatch/system_test_case'
-    can_load_system_tests = true
-  end
-# rubocop:disable Lint/HandleExceptions
-rescue LoadError
-  # rubocop:enable Lint/HandleExceptions
-end
+module RSpec
+  module Rails
+    # @api public
+    # Container class for system tests
+    module SystemExampleGroup
+      extend ActiveSupport::Concern
+      include RSpec::Rails::RailsExampleGroup
+      include ActionDispatch::Integration::Runner
+      include ActionDispatch::Assertions
+      include RSpec::Rails::Matchers::RedirectTo
+      include RSpec::Rails::Matchers::RenderTemplate
+      include ActionController::TemplateAssertions
 
-if !can_load_system_tests
-  module RSpec
-    module Rails
-      module SystemExampleGroup
-        extend ActiveSupport::Concern
+      include ActionDispatch::IntegrationTest::Behavior
 
-        included do
+      # @private
+      module BlowAwayAfterTeardownHook
+        # @private
+        def after_teardown
+        end
+      end
+
+      original_after_teardown = ::ActionDispatch::SystemTesting::TestHelpers::SetupAndTeardown.instance_method(:after_teardown)
+
+      require 'action_dispatch/system_testing'
+      include ::ActionDispatch::SystemTesting::TestHelpers::SetupAndTeardown
+      include ::ActionDispatch::SystemTesting::TestHelpers::ScreenshotHelper
+      include BlowAwayAfterTeardownHook
+
+      # for the SystemTesting Screenshot situation
+      def passed?
+        RSpec.current_example.exception.nil?
+      end
+
+      # @private
+      def method_name
+        @method_name ||= [
+          self.class.name.underscore,
+          RSpec.current_example.description.underscore,
+          rand(1000)
+        ].join("_").gsub(/[\/\.:, ]/, "_")
+      end
+
+      # Delegates to `Rails.application`.
+      def app
+        ::Rails.application
+      end
+
+      included do
+        begin
+          require 'puma'
+          require 'capybara'
+          require 'action_dispatch/system_test_case'
+        rescue LoadError
           abort """
             System test integration requires Rails >= 5.1 and has a hard
             dependency on `puma` and `capybara`, please add these to your
             Gemfile before attempting to use system tests.
           """
         end
-      end
-    end
-  end
-else
-  module RSpec
-    module Rails
-      # @api public
-      # Container class for system tests
-      module SystemExampleGroup
-        extend ActiveSupport::Concern
-        include RSpec::Rails::RailsExampleGroup
-        include ActionDispatch::Integration::Runner
-        include ActionDispatch::Assertions
-        include RSpec::Rails::Matchers::RedirectTo
-        include RSpec::Rails::Matchers::RenderTemplate
-        include ActionController::TemplateAssertions
 
-        include ActionDispatch::IntegrationTest::Behavior
+        attr_reader :driver
 
-        # @private
-        module BlowAwayAfterTeardownHook
-          # @private
-          def after_teardown
-          end
+        if ActionDispatch::SystemTesting::Server.respond_to?(:silence_puma=)
+          ActionDispatch::SystemTesting::Server.silence_puma = true
         end
 
-        original_after_teardown = ::ActionDispatch::SystemTesting::TestHelpers::SetupAndTeardown.instance_method(:after_teardown)
-
-        include ::ActionDispatch::SystemTesting::TestHelpers::SetupAndTeardown
-        include ::ActionDispatch::SystemTesting::TestHelpers::ScreenshotHelper
-        include BlowAwayAfterTeardownHook
-
-        # for the SystemTesting Screenshot situation
-        def passed?
-          RSpec.current_example.exception.nil?
+        def initialize(*args, &blk)
+          super(*args, &blk)
+          @driver = nil
         end
 
-        # @private
-        def method_name
-          @method_name ||= [
-            self.class.name.underscore,
-            RSpec.current_example.description.underscore,
-            rand(1000)
-          ].join("_").gsub(/[\/\.:, ]/, "_")
+        def driven_by(*args, &blk)
+          @driver = ::ActionDispatch::SystemTestCase.driven_by(*args, &blk).tap(&:use)
         end
 
-        # Delegates to `Rails.application`.
-        def app
-          ::Rails.application
+        before do
+          # A user may have already set the driver, so only default if driver
+          # is not set
+          driven_by(:selenium) unless @driver
+          @routes = ::Rails.application.routes
         end
 
-        included do
-          attr_reader :driver
-
-          if ActionDispatch::SystemTesting::Server.respond_to?(:silence_puma=)
-            ActionDispatch::SystemTesting::Server.silence_puma = true
-          end
-
-          def initialize(*args, &blk)
-            super(*args, &blk)
-            @driver = nil
-          end
-
-          def driven_by(*args, &blk)
-            @driver = ::ActionDispatch::SystemTestCase.driven_by(*args, &blk).tap(&:use)
-          end
-
-          before do
-            # A user may have already set the driver, so only default if driver
-            # is not set
-            driven_by(:selenium) unless @driver
-            @routes = ::Rails.application.routes
-          end
-
-          after do
-            orig_stdout = $stdout
-            $stdout = StringIO.new
-            begin
-              original_after_teardown.bind(self).call
-            ensure
-              myio = $stdout
-              RSpec.current_example.metadata[:extra_failure_lines] = myio.string
-              $stdout = orig_stdout
-            end
+        after do
+          orig_stdout = $stdout
+          $stdout = StringIO.new
+          begin
+            original_after_teardown.bind(self).call
+          ensure
+            myio = $stdout
+            RSpec.current_example.metadata[:extra_failure_lines] = myio.string
+            $stdout = orig_stdout
           end
         end
       end
